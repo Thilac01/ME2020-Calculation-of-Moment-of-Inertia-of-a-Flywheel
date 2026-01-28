@@ -6,144 +6,150 @@ import matplotlib.pyplot as plt
 E_number = 395
 R1 = (E_number % 6) + 1
 R2 = (E_number % 3) + 1
-R3 = (E_number % 4) + 1
+R3_val = (E_number % 4) + 1
 
-omega_rpm = 1660       # crank speed in RPM
-omega = omega_rpm * 2 * np.pi / 60  # rad/s
+omega_rpm = 2000       
+omega = omega_rpm * 2 * np.pi / 60  
 
-Bore = 0.08            # m
-Stroke = 0.11          # m
+Bore = 0.08            
+Stroke = 0.11          
 Crank_radius = Stroke / 2
-Connection_rod_length = 0.235 # m
-Area_of_piston = np.pi * (Bore / 2)**2
-Compression_ratio = 8
+Conn_rod_len = 0.235   
+Area_piston = np.pi * (Bore / 2)**2
+Mass_recip = 1.5 + R1/10  
 
-Mass_of_reciprocating_parts_per_cylinder = 1.5 + R1/10  # kg
+# ---------------- Read & Clean Data ----------------
+data = pd.read_excel("data.xlsx")
+data.columns = data.columns.str.strip()
 
-# ---------------- Read Data ----------------
-df = pd.read_excel("data.xlsx")  # make sure your Excel file has Crank_Angle and R3=4 columns
-crank_angle_deg = np.array(df["Crank_Angle"])
-pressure_bar = np.array(df["R3 = 4"])
-pressure_Pa = pressure_bar * 1e5  # convert bar to Pa
+try:
+    p1 = data["R3  = 1"].values * 1e5
+    p2 = data["R3 = 2"].values * 1e5
+    p3 = data["R3= 3"].values * 1e5
+    p4 = data["R3 = 4"].values * 1e5
+    crank_angle = data["Crank_Angle"].values
+except KeyError as e:
+    print(f"Error: Could not find column {e} in Excel.")
+    print(f"Available columns are: {list(data.columns)}")
+    exit()
+
+theta_rad = np.radians(crank_angle)
 
 # ---------------- Functions ----------------
-def Q(theta_rad):
-    return Mass_of_reciprocating_parts_per_cylinder * omega**2 * Crank_radius * (
-        np.cos(theta_rad) + (np.cos(2*theta_rad)/Compression_ratio)
+def inertia_force(theta):
+    return Mass_recip * omega**2 * Crank_radius * (
+        np.cos(theta) + np.cos(2 * theta) / (Conn_rod_len / Crank_radius)
     )
 
-def Torque(p, theta_rad):
-    sin_theta = np.sin(theta_rad)
-    term = 2 * Crank_radius * np.sqrt(Connection_rod_length**2 - (Crank_radius * sin_theta)**2)
-    torque = (p * Area_of_piston - Q(theta_rad)) * Crank_radius * (
-        sin_theta + (Crank_radius * sin_theta) / term
-    )
-    return torque
+def torque(p, theta):
+    sin_theta = np.sin(theta)
+    cos_theta = np.cos(theta)
+    l_r_ratio = Conn_rod_len / Crank_radius
+    term = np.sqrt(l_r_ratio**2 - sin_theta**2)
+    force_net = (p * Area_piston) - inertia_force(theta)
+    return force_net * Crank_radius * sin_theta * (1 + cos_theta / term)
 
-# ---------------- Calculate Torque ----------------
-TOR = np.array([Torque(p, np.radians(theta)) for p, theta in zip(pressure_Pa, crank_angle_deg)])
-crank_angle_rad = np.radians(crank_angle_deg)
+# ---------------- Extend & Shift ----------------
+def extend_and_shift(T, shift_deg):
+    T_720 = np.tile(T[:-1], 2)
+    shift_indices = int(shift_deg * (len(T)-1) / 360)
+    return np.roll(T_720, shift_indices)
 
-# ---------------- Calculate Mean Torque ----------------
-work_per_cycle = np.trapz(TOR, crank_angle_rad)
-mean_torque = work_per_cycle / (4 * np.pi)
-print(f"Work done per cylinder per cycle: {work_per_cycle:.2f} J")
-print(f"Mean torque: {mean_torque:.2f} N·m")
+t1_base = np.array([torque(p, t) for p, t in zip(p1, theta_rad)])
+t2_base = np.array([torque(p, t) for p, t in zip(p2, theta_rad)])
+t3_base = np.array([torque(p, t) for p, t in zip(p3, theta_rad)])
+t4_base = np.array([torque(p, t) for p, t in zip(p4, theta_rad)])
 
-# ---------------- Calculate Energy Fluctuations ----------------
-above_mean = TOR - mean_torque
-energy_segments = []
-labels = []
-cum_energy = []
-cumulative = 0
+# Firing order: 1-3-4-2
+T1 = extend_and_shift(t1_base, 0)
+T3 = extend_and_shift(t3_base, 180)
+T4 = extend_and_shift(t4_base, 360)
+T2 = extend_and_shift(t2_base, 540)
 
-sign = np.sign(above_mean[0])
-start_idx = 0
-segment_idx = 1
-for i in range(1, len(TOR)):
-    current_sign = np.sign(above_mean[i])
-    if current_sign != sign or i == len(TOR)-1:
-        segment_energy = np.trapz(above_mean[start_idx:i+1], crank_angle_rad[start_idx:i+1])
-        energy_segments.append(segment_energy)
-        cumulative += segment_energy
-        cum_energy.append(cumulative)
-        labels.append(f"a{segment_idx}")
-        segment_idx += 1
-        start_idx = i
-        sign = current_sign
+Total_T = T1 + T2 + T3 + T4
+angles_720 = np.linspace(0, 720, len(Total_T))
 
-# ---------------- Plot Torque with Shaded Energy ----------------
-plt.figure(figsize=(14,7))
-plt.plot(crank_angle_deg, TOR, color='blue', lw=2, label="Torque")
+# ---------------- Mean Torque ----------------
+mean_torque = np.mean(Total_T)
 
-# Horizontal and Vertical Lines
-plt.axhline(y=0, color='black', lw=1, label="Zero Torque")
-plt.axhline(y=mean_torque, color='green', lw=2, linestyle='--', label=f"Mean Torque = {mean_torque:.2f} N·m")
+# ---------------- Work per cycle ----------------
+theta_rad_720 = np.radians(angles_720)
+work_total = np.trapz(Total_T, theta_rad_720)
 
-strokes = {"Intake":0, "Compression":180, "Power":360, "Exhaust":540, "Next Intake":720}
-for stroke, angle in strokes.items():
-    plt.axvline(x=angle, color='red', linestyle='--', lw=1)
-    plt.text(angle+5, max(TOR)*0.8, stroke, rotation=90, color='red', verticalalignment='center')
+# ---------------- Segment Area Calculation ----------------
+diff = Total_T - mean_torque
+crossings = np.where(np.diff(np.sign(diff)))[0]
+segment_indices = np.concatenate(([0], crossings+1, [len(diff)-1]))
 
-# Shade Energy Areas and Add Labels
-start_idx = 0
-sign = np.sign(above_mean[0])
-segment_idx = 0
-y_offset = max(TOR)*0.05  # spacing for labels
+areas = []
+cum_energy = 0
+cum_list = []
 
-for i in range(1, len(TOR)):
-    current_sign = np.sign(above_mean[i])
-    if current_sign != sign or i == len(TOR)-1:
-        x_segment = crank_angle_deg[start_idx:i+1]
-        y_segment = TOR[start_idx:i+1]
-        mid_angle = x_segment[len(x_segment)//2]
+for i in range(len(segment_indices)-1):
+    start = segment_indices[i]
+    end = segment_indices[i+1]
 
-        if energy_segments[segment_idx] >= 0:
-            plt.fill_between(x_segment, mean_torque, y_segment, color='orange', alpha=0.3)
-            label_y = max(y_segment) + y_offset
-            value_y = max(y_segment) + y_offset*1.5
-        else:
-            plt.fill_between(x_segment, mean_torque, y_segment, color='purple', alpha=0.3)
-            label_y = min(y_segment) - y_offset
-            value_y = min(y_segment) - y_offset*1.5
+    seg_theta = theta_rad_720[start:end+1]
+    seg_diff = diff[start:end+1]
 
-        plt.text(mid_angle, label_y, labels[segment_idx], color='black', fontweight='bold',
-                 ha='center', va='center', fontsize=10)
-        plt.text(mid_angle, value_y, f"{energy_segments[segment_idx]:.2f} J",
-                 color='black', ha='center', va='center', fontsize=9)
+    area = np.trapz(seg_diff, seg_theta)
 
-        start_idx = i
-        sign = current_sign
-        segment_idx += 1
+    areas.append(area)
+    cum_energy += area
+    cum_list.append(cum_energy)
 
-plt.xlabel("Crank Angle (deg)")
-plt.ylabel("Torque (N·m)")
-plt.title("Torque vs Crank Angle with Energy Fluctuations")
-plt.grid(True, alpha=0.3)
-plt.legend()
-plt.show()
-
-# ---------------- Stroke-wise Energy and Maximum Fluctuation ----------------
-stroke_ranges = {
-    "Intake": (0, 180),
-    "Compression": (180, 360),
-    "Power": (360, 540),
-    "Exhaust": (540, 720)
-}
-
-stroke_energy = {}
-for stroke, (start_deg, end_deg) in stroke_ranges.items():
-    idx = np.where((crank_angle_deg >= start_deg) & (crank_angle_deg <= end_deg))[0]
-    energy = np.trapz(TOR[idx] - mean_torque, crank_angle_rad[idx])
-    stroke_energy[stroke] = energy
-
-stroke_energy_table = pd.DataFrame({
-    "Stroke": list(stroke_energy.keys()),
-    "Energy (J)": list(stroke_energy.values())
+area_table = pd.DataFrame({
+    "Segment": np.arange(1, len(areas)+1),
+    "Start Angle (deg)": angles_720[segment_indices[:-1]],
+    "End Angle (deg)": angles_720[segment_indices[1:]],
+    "Area (J)": areas,
+    "Cumulative Energy (J)": cum_list
 })
 
-max_energy_fluctuation = stroke_energy_table["Energy (J)"].max() - stroke_energy_table["Energy (J)"].min()
+# ---------------- Maximum Energy Fluctuation ----------------
+E_max = max(cum_list)
+E_min = min(cum_list)
+delta_E = E_max - E_min
 
-print("\nStroke-wise Energy Table:")
-print(stroke_energy_table)
-print(f"\nMaximum energy fluctuation ΔE: {max_energy_fluctuation:.2f} J")
+print("\n--- Energy Fluctuation Table ---")
+print(area_table)
+
+print(f"\nMean Torque = {mean_torque:.2f} Nm")
+print(f"Work done per cycle = {work_total:.2f} J")
+print(f"Maximum Energy Fluctuation ΔE = {delta_E:.2f} J")
+
+# ---------------- Save to Excel ----------------
+area_table.to_excel("Energy_Fluctuation_Table.xlsx", index=False)
+
+summary = pd.DataFrame({
+    "Quantity": ["Mean Torque", "Work per cycle", "Max Energy Fluctuation ΔE"],
+    "Value": [mean_torque, work_total, delta_E]
+})
+summary.to_excel("Summary_Results.xlsx", index=False)
+
+# ---------------- Plot ----------------
+plt.figure(figsize=(12,6))
+
+plt.plot(angles_720, Total_T, linewidth=2, label='Resultant Torque')
+plt.axhline(mean_torque, linestyle='--', linewidth=2, label=f"Mean Torque = {mean_torque:.1f} Nm")
+
+plt.fill_between(angles_720, Total_T, mean_torque,
+                 where=(Total_T > mean_torque),
+                 alpha=0.3, label='Above Mean')
+
+plt.fill_between(angles_720, Total_T, mean_torque,
+                 where=(Total_T < mean_torque),
+                 alpha=0.3, label='Below Mean')
+
+plt.title("Turning Moment Diagram & Energy Fluctuation")
+plt.xlabel("Crank Angle (Degrees)")
+plt.ylabel("Torque (Nm)")
+plt.xlim(0,720)
+plt.grid(True, linestyle='--', alpha=0.5)
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+print("\nFiles created:")
+print(" - Energy_Fluctuation_Table.xlsx")
+print(" - Summary_Results.xlsx")
